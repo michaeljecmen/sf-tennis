@@ -408,6 +408,9 @@ class SFTennisChecker:
         completed = 0
         total = len(courts)
         
+        # Show initial progress bar
+        print(f"⏳ checking {total} courts...")
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_court = {
                 executor.submit(self.check_single_court, court, date_input): court 
@@ -419,7 +422,7 @@ class SFTennisChecker:
                 results.append(result)
                 completed += 1
                 
-                # Update progress bar
+                # Update progress bar every completion
                 elapsed = time.time() - start_time
                 progress = completed / total
                 bar_length = 40
@@ -442,11 +445,16 @@ class SFTennisChecker:
     
     def format_time(self, time_str):
         """Convert time string to compact format"""
-        # Convert "10:00 AM" -> "10am", "1:30 PM" -> "1:30pm"
+        # Convert "10:00 AM" -> "10am", "2:00 PM" -> "2pm", "1:30 PM" -> "1:30pm"
         time_str = time_str.strip()
         if ':' in time_str and ('AM' in time_str or 'PM' in time_str):
             time_part = time_str.split()[0]
             period = time_str.split()[1].lower()
+            
+            # Remove :00 for on-the-hour times
+            if time_part.endswith(':00'):
+                time_part = time_part[:-3]
+            
             return f"{time_part}{period}"
         return time_str.lower()
     
@@ -458,17 +466,21 @@ class SFTennisChecker:
     
     def format_results(self, results):
         """Format results in clean tabular format"""
-        successful = [r for r in results if r['success']]
-        failed = [r for r in results if not r['success']]
+        # Only show courts with actual availability
+        available = [r for r in results if r['success'] and r['availability'].get('time_slots_with_duration', [])]
+        # Only show real errors (not "no availability found")
+        real_errors = [r for r in results if not r['success'] and 'no availability found' not in r['error'].lower()]
         
-        print(f"\n📊 results: {len(successful)} courts available, {len(failed)} failed")
-        print("=" * 70)
+        print(f"\n📊 results: {len(available)} courts available")
+        if real_errors:
+            print(f"❌ {len(real_errors)} errors")
+        print("=" * 100)
         
-        if successful:
-            print(f"{'court':<25} {'times':<45}")
-            print("-" * 70)
+        if available:
+            print(f"{'court':<35} {'times':<65}")
+            print("-" * 100)
             
-            for result in successful:
+            for result in available:
                 court = self.format_court_name(result['court'])
                 slots = result['availability'].get('time_slots_with_duration', [])
                 
@@ -482,12 +494,14 @@ class SFTennisChecker:
                             time_groups[duration] = []
                         time_groups[duration].append(time_str)
                     
-                    # Format times compactly - only show duration if not 60m
+                    # Format times compactly - use + for 90m, nothing for 60m
                     time_display = []
                     for duration, times in sorted(time_groups.items()):
                         times_str = ', '.join(sorted(set(times)))
                         if duration == 60:
                             time_display.append(times_str)
+                        elif duration == 90:
+                            time_display.append(f"{times_str}+")
                         else:
                             time_display.append(f"{times_str} ({duration}m)")
                     
@@ -496,18 +510,18 @@ class SFTennisChecker:
                     times_display = "no times"
                 
                 # Truncate if too long
-                court_display = court[:22] + "..." if len(court) > 25 else court
-                times_display = times_display[:43] + "..." if len(times_display) > 45 else times_display
+                court_display = court[:32] + "..." if len(court) > 35 else court
+                times_display = times_display[:63] + "..." if len(times_display) > 65 else times_display
                 
-                print(f"{court_display:<25} {times_display:<45}")
+                print(f"{court_display:<35} {times_display:<65}")
         
-        if failed:
-            print(f"\n❌ failed ({len(failed)}):")
-            for result in failed[:5]:  # Show first 5 failures
+        if real_errors:
+            print(f"\n❌ errors ({len(real_errors)}):")
+            for result in real_errors[:5]:  # Show first 5 real errors
                 court = self.format_court_name(result['court'])
                 print(f"  {court}: {result['error'].lower()}")
-            if len(failed) > 5:
-                print(f"  ... and {len(failed) - 5} more")
+            if len(real_errors) > 5:
+                print(f"  ... and {len(real_errors) - 5} more")
 
 def main():
     import sys
