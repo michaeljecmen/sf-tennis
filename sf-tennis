@@ -4,6 +4,7 @@ SF Tennis Court Availability Checker
 
 A fast, parallel tennis court availability checker for San Francisco Rec & Park.
 Combines URL scraping and availability checking into a single executable.
+Results are sorted by biking distance from your location (closest first).
 
 Usage:
     python sf-tennis [date] [options]
@@ -13,6 +14,22 @@ Examples:
     python sf-tennis "next friday"
     python sf-tennis "oct 25"
     python sf-tennis --workers 8 "tomorrow"
+    python sf-tennis --refresh-distances "tomorrow"
+    python sf-tennis --address "123 Main St, SF" "tomorrow"
+    
+Options:
+    --workers N          Number of parallel workers (default: auto-optimized)
+    --refresh-distances  Refresh court distance data before checking
+    --refresh            Short form of --refresh-distances
+    --address "addr"     Use custom address for distance calculations
+    
+Setup:
+    1. Install requirements: pip install selenium beautifulsoup4 requests
+    2. Run: python setup_distances.py (one-time setup)
+    3. Then use normally: python sf-tennis tomorrow
+    4. Update distances: python sf-tennis --refresh-distances
+    
+Note: Completely free using web scraping - no API keys needed!
 """
 
 import time
@@ -475,25 +492,79 @@ class SFTennisChecker:
         court = re.sub(r'\s+tennis\s+court.*$', '', court_name, flags=re.IGNORECASE)
         return court.strip().lower()
     
+    def load_court_distances(self):
+        """Load court distances from JSON file"""
+        try:
+            if not os.path.exists('court_distances.json'):
+                print("⚠️  No distance data found. Courts will be sorted alphabetically.")
+                print("💡 Run distance_calculator.py to calculate biking distances")
+                return {}
+            
+            with open('court_distances.json', 'r', encoding='utf-8') as f:
+                distance_data = json.load(f)
+            
+            # Create a mapping from formatted court name to distance info
+            court_distances = {}
+            for court in distance_data.get('courts_by_distance', []):
+                court_name = court['court_name']
+                formatted_name = self.format_court_name(court_name)
+                distance_info = court.get('distance_info', {})
+                if distance_info:
+                    court_distances[formatted_name] = distance_info
+            
+            print(f"📍 Loaded distance data for {len(court_distances)} courts")
+            return court_distances
+            
+        except Exception as e:
+            print(f"⚠️  Error loading distance data: {e}")
+            return {}
+    
+    def sort_courts_by_distance(self, results, court_distances):
+        """Sort courts by biking distance (closest first)"""
+        def get_distance_key(result):
+            court_name = result['court']
+            formatted_name = self.format_court_name(court_name)
+            distance_info = court_distances.get(formatted_name)
+            if distance_info:
+                return distance_info.get('duration_seconds', float('inf'))
+            else:
+                return float('inf')  # Put courts without distance data at the end
+        
+        return sorted(results, key=get_distance_key)
+    
     def format_results(self, results):
         """Format results in clean tabular format"""
+        # Load distance data
+        court_distances = self.load_court_distances()
+        
         # Only show courts with actual availability
         available = [r for r in results if r['success'] and r['availability'].get('time_slots_with_duration', [])]
         # Only show real errors (not "no availability found")
         real_errors = [r for r in results if not r['success'] and 'no availability found' not in r['error'].lower()]
         
+        # Sort available courts by distance
+        available = self.sort_courts_by_distance(available, court_distances)
+        
         print(f"\n📊 results: {len(available)} courts available")
         if real_errors:
             print(f"❌ {len(real_errors)} errors")
-        print("=" * 100)
+        print("=" * 180)
         
         if available:
-            print(f"{'court':<35} {'times':<65}")
-            print("-" * 100)
+            print(f"{'court':<60} {'times':<120}")
+            print("-" * 180)
             
             for result in available:
                 court = self.format_court_name(result['court'])
                 slots = result['availability'].get('time_slots_with_duration', [])
+                
+                # Get distance info and add to court name
+                formatted_court_name = self.format_court_name(result['court'])
+                distance_info = court_distances.get(formatted_court_name, {})
+                if distance_info:
+                    duration = distance_info.get('duration_text', '')
+                    if duration:
+                        court = f"{court} ({duration})"
                 
                 if slots:
                     # Collect all times with their durations
@@ -508,14 +579,26 @@ class SFTennisChecker:
                         time_str, duration = time_duration
                         # Convert to 24h format for sorting
                         if 'am' in time_str:
-                            hour = int(time_str.replace('am', '').replace(':', ''))
+                            # Handle AM times
+                            time_clean = time_str.replace('am', '').replace(':', '')
+                            if ':' in time_str:
+                                hour, minute = time_str.replace('am', '').split(':')
+                                hour, minute = int(hour), int(minute)
+                            else:
+                                hour, minute = int(time_clean), 0
                             if hour == 12:
                                 hour = 0
+                            return hour * 60 + minute
                         else:  # pm
-                            hour = int(time_str.replace('pm', '').replace(':', ''))
+                            # Handle PM times
+                            if ':' in time_str:
+                                hour, minute = time_str.replace('pm', '').split(':')
+                                hour, minute = int(hour), int(minute)
+                            else:
+                                hour, minute = int(time_str.replace('pm', '')), 0
                             if hour != 12:
                                 hour += 12
-                        return hour
+                            return hour * 60 + minute
                     
                     all_times.sort(key=time_sort_key)
                     
@@ -534,10 +617,10 @@ class SFTennisChecker:
                     times_display = "no times"
                 
                 # Truncate if too long
-                court_display = court[:32] + "..." if len(court) > 35 else court
-                times_display = times_display[:63] + "..." if len(times_display) > 65 else times_display
+                court_display = court[:57] + "..." if len(court) > 60 else court
+                times_display = times_display[:117] + "..." if len(times_display) > 120 else times_display
                 
-                print(f"{court_display:<35} {times_display:<65}")
+                print(f"{court_display:<60} {times_display:<120}")
         
         if real_errors:
             print(f"\n❌ errors ({len(real_errors)}):")
@@ -549,14 +632,30 @@ class SFTennisChecker:
 
 def main():
     import sys
-    
+    import subprocess
     
     # Parse arguments
     date_input = None
     max_workers = 12  # Optimized default
+    refresh_distances = False
+    address_override = None
     
     if len(sys.argv) > 1:
         args = sys.argv[1:]
+        
+        # Check for special flags
+        if '--refresh-distances' in args or '--refresh' in args:
+            refresh_distances = True
+            args.remove('--refresh-distances' if '--refresh-distances' in args else '--refresh')
+        
+        if '--address' in args:
+            try:
+                address_idx = args.index('--address')
+                address_override = args[address_idx + 1]
+                args.pop(address_idx)
+                args.pop(address_idx)
+            except (ValueError, IndexError):
+                print("⚠️  Invalid --address value")
         
         if '--workers' in args:
             try:
@@ -569,6 +668,25 @@ def main():
         
         if args:
             date_input = ' '.join(args)
+    
+    # Handle distance refresh
+    if refresh_distances:
+        print("🔄 Refreshing court distances...")
+        try:
+            # Calculate distances directly
+            print("🚴 Calculating biking distances...")
+            if address_override:
+                subprocess.run([sys.executable, 'google_maps_distance_calculator.py', address_override], check=True)
+            else:
+                subprocess.run([sys.executable, 'google_maps_distance_calculator.py'], check=True)
+            
+            print("✅ Distance data refreshed!")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Error refreshing distances: {e}")
+            return
+        except FileNotFoundError:
+            print("❌ Required script not found. Make sure google_maps_distance_calculator.py is in the same directory.")
+            return
     
     # Run checker
     checker = SFTennisChecker()
