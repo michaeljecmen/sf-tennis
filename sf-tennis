@@ -485,27 +485,40 @@ class SFTennisChecker:
                 slots = result['availability'].get('time_slots_with_duration', [])
                 
                 if slots:
-                    # Group by duration for cleaner display
-                    time_groups = {}
+                    # Collect all times with their durations
+                    all_times = []
                     for slot in slots:
                         time_str = self.format_time(slot['time'])
                         duration = slot['duration_minutes']
-                        if duration not in time_groups:
-                            time_groups[duration] = []
-                        time_groups[duration].append(time_str)
+                        all_times.append((time_str, duration))
                     
-                    # Format times compactly - use + for 90m, nothing for 60m
+                    # Sort by time (convert to 24h for proper sorting)
+                    def time_sort_key(time_duration):
+                        time_str, duration = time_duration
+                        # Convert to 24h format for sorting
+                        if 'am' in time_str:
+                            hour = int(time_str.replace('am', '').replace(':', ''))
+                            if hour == 12:
+                                hour = 0
+                        else:  # pm
+                            hour = int(time_str.replace('pm', '').replace(':', ''))
+                            if hour != 12:
+                                hour += 12
+                        return hour
+                    
+                    all_times.sort(key=time_sort_key)
+                    
+                    # Format times with duration indicators
                     time_display = []
-                    for duration, times in sorted(time_groups.items()):
-                        times_str = ', '.join(sorted(set(times)))
+                    for time_str, duration in all_times:
                         if duration == 60:
-                            time_display.append(times_str)
+                            time_display.append(time_str)
                         elif duration == 90:
-                            time_display.append(f"{times_str}+")
+                            time_display.append(f"{time_str}+")
                         else:
-                            time_display.append(f"{times_str} ({duration}m)")
+                            time_display.append(f"{time_str} ({duration}m)")
                     
-                    times_display = ' | '.join(time_display)
+                    times_display = ', '.join(time_display)
                 else:
                     times_display = "no times"
                 
