@@ -81,6 +81,9 @@ class TennisAvailabilityChecker:
             # Give it a bit more time for dynamic content
             time.sleep(3)
             
+            # Try to click on the next available date to get specific times
+            self.click_next_available_date()
+            
             # Extract availability information
             availability_info = self.extract_availability_info()
             
@@ -103,6 +106,133 @@ class TennisAvailabilityChecker:
             print(f"❌ Error checking availability: {e}")
             return None
     
+    def click_next_available_date(self):
+        """Try to click on the next available date to get specific times"""
+        try:
+            print("🔍 Looking for next available date to click...")
+            
+            # First, try to find and click the date picker to open it
+            date_picker_selectors = [
+                "//*[contains(@class, 'react-datepicker-wrapper')]",
+                "//*[contains(@class, 'date') and contains(@class, 'picker')]",
+                "//*[contains(@class, 'calendar')]",
+                "//*[contains(@class, 'picker')]",
+                "//input[@type='date']"
+            ]
+            
+            # Try to open the date picker first
+            for selector in date_picker_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    print(f"🔍 Checking date picker selector '{selector}': found {len(elements)} elements")
+                    for element in elements:
+                        if element.is_displayed() and element.is_enabled():
+                            print(f"📅 Found date picker: {element.text[:50]}...")
+                            print(f"   Element tag: {element.tag_name}, classes: {element.get_attribute('class')}")
+                            element.click()
+                            print("✅ Clicked on date picker")
+                            time.sleep(2)  # Wait for calendar to open
+                            
+                            # Now look for specific date elements within the opened calendar
+                            date_selectors = [
+                                "//*[contains(@class, 'react-datepicker__day') and contains(text(), '20')]",  # October 20
+                                "//*[contains(@class, 'react-datepicker__day')]",  # Any calendar day
+                                "//*[contains(@class, 'day') and contains(@class, 'available')]",  # Available days
+                                "//*[contains(@class, 'day') and not(contains(@class, 'disabled'))]",  # Non-disabled days
+                                "//*[contains(@class, 'day')]",
+                                "//*[contains(text(), '20') and not(contains(text(), 'St'))]",  # 20 but not "St"
+                                "//*[contains(text(), 'Mon') and not(contains(text(), 'Marble'))]"  # Mon but not "Marble"
+                            ]
+                            
+                            for date_selector in date_selectors:
+                                try:
+                                    date_elements = self.driver.find_elements(By.XPATH, date_selector)
+                                    print(f"🔍 Looking for date '{date_selector}': found {len(date_elements)} elements")
+                                    for date_element in date_elements:
+                                        if date_element.is_displayed() and date_element.is_enabled():
+                                            text = date_element.text.strip()
+                                            if '20' in text or 'Mon' in text:
+                                                print(f"📅 Found date element: {text}")
+                                                date_element.click()
+                                                print("✅ Clicked on specific date")
+                                                time.sleep(3)  # Wait for times to load
+                                                return True
+                                except Exception as e:
+                                    continue
+                            
+                            return True  # Even if we can't find specific date, we opened the picker
+                except Exception as e:
+                    print(f"⚠️  Error with date picker selector '{selector}': {e}")
+                    continue
+            
+            print("⚠️  No clickable date picker found")
+            return False
+            
+        except Exception as e:
+            print(f"⚠️  Error clicking date: {e}")
+            return False
+    
+    def find_duration_for_time_element(self, time_element):
+        """Find duration information near a time element"""
+        try:
+            # Look for duration in the same element or nearby elements
+            # Check the element's text for numbers that could be duration
+            element_text = time_element.text.strip()
+            
+            # Look for numbers in the element text (like "10:00 AM 60")
+            import re
+            numbers = re.findall(r'\b(\d+)\b', element_text)
+            for num in numbers:
+                if 30 <= int(num) <= 180:  # Reasonable duration range (30-180 minutes)
+                    return int(num)
+            
+            # Look in the parent element
+            parent = time_element.find_element(By.XPATH, "..")
+            parent_text = parent.text.strip()
+            numbers = re.findall(r'\b(\d+)\b', parent_text)
+            for num in numbers:
+                if 30 <= int(num) <= 180:
+                    return int(num)
+            
+            # Look in sibling elements
+            try:
+                siblings = time_element.find_elements(By.XPATH, "following-sibling::* | preceding-sibling::*")
+                for sibling in siblings:
+                    sibling_text = sibling.text.strip()
+                    if sibling_text and len(sibling_text) < 10:  # Short text likely to be duration
+                        numbers = re.findall(r'\b(\d+)\b', sibling_text)
+                        for num in numbers:
+                            if 30 <= int(num) <= 180:
+                                return int(num)
+            except:
+                pass
+            
+            # Look for elements with duration-related classes
+            duration_selectors = [
+                ".//*[contains(@class, 'duration')]",
+                ".//*[contains(@class, 'minutes')]",
+                ".//*[contains(@class, 'length')]",
+                ".//*[contains(@class, 'time-length')]"
+            ]
+            
+            for selector in duration_selectors:
+                try:
+                    duration_elements = time_element.find_elements(By.XPATH, selector)
+                    for duration_element in duration_elements:
+                        duration_text = duration_element.text.strip()
+                        numbers = re.findall(r'\b(\d+)\b', duration_text)
+                        for num in numbers:
+                            if 30 <= int(num) <= 180:
+                                return int(num)
+                except:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️  Error finding duration: {e}")
+            return None
+    
     def extract_availability_info(self):
         """Extract availability information from the rendered page"""
         try:
@@ -117,6 +247,8 @@ class TennisAvailabilityChecker:
                 'next_available': '',
                 'operating_hours': '',
                 'location_name': '',
+                'available_times': [],
+                'time_slots_with_duration': [],
                 'raw_text_found': []
             }
             
@@ -164,6 +296,44 @@ class TennisAvailabilityChecker:
                     if '7:30am' in text or 'pm' in text:
                         availability_info['operating_hours'] = text
                         break
+                
+                # Look for specific time slots (after clicking on date)
+                time_selectors = [
+                    "//*[contains(@class, 'time')]",
+                    "//*[contains(@class, 'slot')]", 
+                    "//*[contains(@class, 'hour')]",
+                    "//*[contains(@class, 'booking')]",
+                    "//*[contains(@class, 'reservation')]",
+                    "//*[contains(text(), 'AM') or contains(text(), 'PM')]",
+                    "//button[contains(text(), 'AM') or contains(text(), 'PM') or contains(text(), ':')]",
+                    "//*[contains(@class, 'react-datepicker__time')]",
+                    "//*[contains(@class, 'time-picker')]",
+                    "//*[contains(@class, 'time-slot')]"
+                ]
+                
+                for selector in time_selectors:
+                    try:
+                        time_elements = self.driver.find_elements(By.XPATH, selector)
+                        print(f"🔍 Looking for times with selector '{selector}': found {len(time_elements)} elements")
+                        for element in time_elements:
+                            text = element.text.strip()
+                            # Look for time patterns like "8:00 AM", "2:30 PM", etc.
+                            if any(pattern in text for pattern in ['AM', 'PM', ':', 'am', 'pm']):
+                                if len(text) < 30 and len(text) > 2:  # Avoid long text blocks but include short times
+                                    print(f"⏰ Found time element: {text}")
+                                    availability_info['available_times'].append(text)
+                                    
+                                    # Try to find duration information near this time element
+                                    duration = self.find_duration_for_time_element(element)
+                                    if duration:
+                                        time_slot = {
+                                            'time': text,
+                                            'duration_minutes': duration
+                                        }
+                                        availability_info['time_slots_with_duration'].append(time_slot)
+                                        print(f"⏱️  Duration for {text}: {duration} minutes")
+                    except Exception as e:
+                        continue
                 
             except Exception as e:
                 print(f"⚠️  Error extracting specific elements: {e}")
@@ -223,6 +393,19 @@ def main():
             print(f"  Availability Text: {availability['availability_text']}")
             print(f"  Next Available: {availability['next_available']}")
             print(f"  Operating Hours: {availability['operating_hours']}")
+            
+            if availability['available_times']:
+                print(f"  Available Times: {', '.join(set(availability['available_times']))}")
+            else:
+                print(f"  Available Times: No specific times found")
+            
+            if availability['time_slots_with_duration']:
+                print(f"  Time Slots with Duration:")
+                for slot in availability['time_slots_with_duration']:
+                    print(f"    {slot['time']}: {slot['duration_minutes']} minutes")
+            else:
+                print(f"  Time Slots with Duration: No duration info found")
+            
             print(f"  Patterns Found: {', '.join(availability['raw_text_found'])}")
             
             # Results are already printed above, no need to save JSON files
