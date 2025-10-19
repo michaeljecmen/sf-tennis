@@ -118,6 +118,17 @@ class SFTennisChecker:
         firefox_options.set_preference("dom.webdriver.enabled", False)
         firefox_options.set_preference("useAutomationExtension", False)
         
+        # Additional speed optimizations
+        firefox_options.set_preference("javascript.enabled", True)
+        firefox_options.set_preference("dom.disable_beforeunload", True)
+        firefox_options.set_preference("browser.cache.disk.enable", False)
+        firefox_options.set_preference("browser.cache.memory.enable", False)
+        firefox_options.set_preference("browser.cache.offline.enable", False)
+        firefox_options.set_preference("network.http.use-cache", False)
+        firefox_options.set_preference("media.autoplay.default", 5)  # Block autoplay
+        firefox_options.set_preference("dom.push.enabled", False)
+        firefox_options.set_preference("dom.serviceWorkers.enabled", False)
+        
         # Try headless first
         try:
             firefox_options.add_argument("--headless")
@@ -348,13 +359,13 @@ class SFTennisChecker:
             
             # Navigate to page
             checker.driver.get(url)
-            time.sleep(2)  # Reduced wait time
+            time.sleep(1)  # Minimal wait for page load
             
             # Parse date
             target_date = checker.parse_date_input(date_input)
             if target_date:
                 checker.click_specific_date(target_date)
-                time.sleep(1)  # Reduced wait time
+                time.sleep(0.5)  # Minimal wait for date selection
             
             # Extract availability
             availability = checker.extract_availability_info()
@@ -397,11 +408,11 @@ class SFTennisChecker:
         # Auto-optimize worker count based on court count
         if max_workers == 12:  # Default
             if len(courts) < 20:
-                max_workers = min(6, len(courts))
+                max_workers = min(8, len(courts))
             elif len(courts) < 50:
-                max_workers = min(10, len(courts))
+                max_workers = min(12, len(courts))
             else:
-                max_workers = min(16, len(courts))
+                max_workers = min(20, len(courts))
         
         start_time = time.time()
         results = []
