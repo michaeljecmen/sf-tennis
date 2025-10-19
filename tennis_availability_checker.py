@@ -8,7 +8,8 @@ Automates Firefox to check tennis court availability on SF Rec & Park pages.
 import time
 import json
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
@@ -45,11 +46,20 @@ class TennisAvailabilityChecker:
             print(f"❌ Error initializing Firefox driver: {e}")
             return False
     
-    def check_tennis_availability(self, url, court_name="Tennis Court"):
-        """Check availability for a specific tennis court page"""
+    def check_tennis_availability(self, url, court_name="Tennis Court", date_input=None):
+        """Check availability for a specific tennis court page on a specific date"""
         if not self.driver:
             print("❌ Driver not initialized")
             return None
+        
+        # Parse the date input if provided
+        target_date = None
+        if date_input:
+            target_date = self.parse_date_input(date_input)
+            if target_date:
+                print(f"📅 Target date: {target_date.strftime('%A, %B %d, %Y')}")
+            else:
+                print(f"⚠️  Could not parse date: '{date_input}' - using next available date")
         
         print(f"\n🎾 Checking availability for: {court_name}")
         print(f"📍 URL: {url}")
@@ -81,8 +91,8 @@ class TennisAvailabilityChecker:
             # Give it a bit more time for dynamic content
             time.sleep(3)
             
-            # Try to click on the next available date to get specific times
-            self.click_next_available_date()
+            # Try to click on the specific date or next available date
+            self.click_specific_date(target_date)
             
             # Extract availability information
             availability_info = self.extract_availability_info()
@@ -106,10 +116,13 @@ class TennisAvailabilityChecker:
             print(f"❌ Error checking availability: {e}")
             return None
     
-    def click_next_available_date(self):
-        """Try to click on the next available date to get specific times"""
+    def click_specific_date(self, target_date=None):
+        """Try to click on a specific date to get times for that date"""
         try:
-            print("🔍 Looking for next available date to click...")
+            if target_date:
+                print(f"🔍 Looking for specific date: {target_date.strftime('%A, %B %d, %Y')}")
+            else:
+                print("🔍 Looking for next available date to click...")
             
             # First, try to find and click the date picker to open it
             date_picker_selectors = [
@@ -134,15 +147,28 @@ class TennisAvailabilityChecker:
                             time.sleep(2)  # Wait for calendar to open
                             
                             # Now look for specific date elements within the opened calendar
-                            date_selectors = [
-                                "//*[contains(@class, 'react-datepicker__day') and contains(text(), '20')]",  # October 20
-                                "//*[contains(@class, 'react-datepicker__day')]",  # Any calendar day
-                                "//*[contains(@class, 'day') and contains(@class, 'available')]",  # Available days
-                                "//*[contains(@class, 'day') and not(contains(@class, 'disabled'))]",  # Non-disabled days
-                                "//*[contains(@class, 'day')]",
-                                "//*[contains(text(), '20') and not(contains(text(), 'St'))]",  # 20 but not "St"
-                                "//*[contains(text(), 'Mon') and not(contains(text(), 'Marble'))]"  # Mon but not "Marble"
-                            ]
+                            if target_date:
+                                # Look for the specific date
+                                day_number = str(target_date.day)
+                                month_name = target_date.strftime('%b').lower()
+                                day_name = target_date.strftime('%a').lower()
+                                
+                                date_selectors = [
+                                    f"//*[contains(@class, 'react-datepicker__day') and contains(text(), '{day_number}')]",
+                                    f"//*[contains(@class, 'day') and contains(text(), '{day_number}')]",
+                                    f"//*[contains(text(), '{day_number}') and not(contains(text(), 'St'))]"
+                                ]
+                            else:
+                                # Look for next available date (original behavior)
+                                date_selectors = [
+                                    "//*[contains(@class, 'react-datepicker__day') and contains(text(), '20')]",  # October 20
+                                    "//*[contains(@class, 'react-datepicker__day')]",  # Any calendar day
+                                    "//*[contains(@class, 'day') and contains(@class, 'available')]",  # Available days
+                                    "//*[contains(@class, 'day') and not(contains(@class, 'disabled'))]",  # Non-disabled days
+                                    "//*[contains(@class, 'day')]",
+                                    "//*[contains(text(), '20') and not(contains(text(), 'St'))]",  # 20 but not "St"
+                                    "//*[contains(text(), 'Mon') and not(contains(text(), 'Marble'))]"  # Mon but not "Marble"
+                                ]
                             
                             for date_selector in date_selectors:
                                 try:
@@ -151,12 +177,22 @@ class TennisAvailabilityChecker:
                                     for date_element in date_elements:
                                         if date_element.is_displayed() and date_element.is_enabled():
                                             text = date_element.text.strip()
-                                            if '20' in text or 'Mon' in text:
-                                                print(f"📅 Found date element: {text}")
-                                                date_element.click()
-                                                print("✅ Clicked on specific date")
-                                                time.sleep(3)  # Wait for times to load
-                                                return True
+                                            if target_date:
+                                                # For specific date, look for the day number
+                                                if day_number in text and len(text) <= 2:
+                                                    print(f"📅 Found target date element: {text}")
+                                                    date_element.click()
+                                                    print(f"✅ Clicked on {target_date.strftime('%A, %B %d')}")
+                                                    time.sleep(3)  # Wait for times to load
+                                                    return True
+                                            else:
+                                                # Original behavior for next available
+                                                if '20' in text or 'Mon' in text:
+                                                    print(f"📅 Found date element: {text}")
+                                                    date_element.click()
+                                                    print("✅ Clicked on specific date")
+                                                    time.sleep(3)  # Wait for times to load
+                                                    return True
                                 except Exception as e:
                                     continue
                             
@@ -171,6 +207,121 @@ class TennisAvailabilityChecker:
         except Exception as e:
             print(f"⚠️  Error clicking date: {e}")
             return False
+    
+    def parse_date_input(self, date_input):
+        """Parse natural language date input into a datetime object"""
+        if not date_input:
+            return None
+            
+        date_input = date_input.lower().strip()
+        today = datetime.now()
+        
+        # Handle "tomorrow"
+        if date_input in ['tomorrow', 'tom']:
+            return today + timedelta(days=1)
+        
+        # Handle "today"
+        if date_input in ['today', 'now']:
+            return today
+        
+        # Handle day of week (this week or next week)
+        days_of_week = {
+            'monday': 0, 'mon': 0, 'm': 0,
+            'tuesday': 1, 'tue': 1, 'tues': 1, 't': 1,
+            'wednesday': 2, 'wed': 2, 'w': 2,
+            'thursday': 3, 'thu': 3, 'thurs': 3, 'th': 3,
+            'friday': 4, 'fri': 4, 'f': 4,
+            'saturday': 5, 'sat': 5, 's': 5,
+            'sunday': 6, 'sun': 6, 'su': 6
+        }
+        
+        # Check for "next [day]" pattern
+        if date_input.startswith('next '):
+            day_name = date_input[5:].strip()
+            if day_name in days_of_week:
+                target_day = days_of_week[day_name]
+                days_ahead = target_day - today.weekday()
+                if days_ahead <= 0:  # Target day already passed this week
+                    days_ahead += 7
+                return today + timedelta(days=days_ahead)
+        
+        # Check for just day name (this week)
+        if date_input in days_of_week:
+            target_day = days_of_week[date_input]
+            days_ahead = target_day - today.weekday()
+            if days_ahead < 0:  # Day already passed this week
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
+        
+        # Handle "Oct 23", "October 23", "10/23", "10-23" patterns
+        month_patterns = {
+            'jan': 1, 'january': 1,
+            'feb': 2, 'february': 2,
+            'mar': 3, 'march': 3,
+            'apr': 4, 'april': 4,
+            'may': 5,
+            'jun': 6, 'june': 6,
+            'jul': 7, 'july': 7,
+            'aug': 8, 'august': 8,
+            'sep': 9, 'september': 9,
+            'oct': 10, 'october': 10,
+            'nov': 11, 'november': 11,
+            'dec': 12, 'december': 12
+        }
+        
+        # Try to parse month/day patterns
+        for month_name, month_num in month_patterns.items():
+            if month_name in date_input:
+                # Extract day number
+                day_match = re.search(r'\b(\d{1,2})\b', date_input)
+                if day_match:
+                    day = int(day_match.group(1))
+                    year = today.year
+                    # If the date is in the past, assume next year
+                    try:
+                        target_date = datetime(year, month_num, day)
+                        if target_date < today:
+                            target_date = datetime(year + 1, month_num, day)
+                        return target_date
+                    except ValueError:
+                        continue
+        
+        # Handle numeric patterns like "10/23", "10-23", "10.23"
+        numeric_patterns = [
+            r'(\d{1,2})[/\-\.](\d{1,2})',  # MM/DD or MM-DD
+            r'(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})'  # MM/DD/YY or MM/DD/YYYY
+        ]
+        
+        for pattern in numeric_patterns:
+            match = re.search(pattern, date_input)
+            if match:
+                groups = match.groups()
+                if len(groups) == 2:  # MM/DD
+                    month, day = int(groups[0]), int(groups[1])
+                    year = today.year
+                    try:
+                        target_date = datetime(year, month, day)
+                        if target_date < today:
+                            target_date = datetime(year + 1, month, day)
+                        return target_date
+                    except ValueError:
+                        continue
+                elif len(groups) == 3:  # MM/DD/YY or MM/DD/YYYY
+                    month, day, year = int(groups[0]), int(groups[1]), int(groups[2])
+                    if year < 100:  # Two digit year
+                        year += 2000 if year < 50 else 1900
+                    try:
+                        return datetime(year, month, day)
+                    except ValueError:
+                        continue
+        
+        # Handle relative days like "in 3 days", "3 days from now"
+        relative_match = re.search(r'(\d+)\s*days?\s*(?:from now|ahead|later)?', date_input)
+        if relative_match:
+            days = int(relative_match.group(1))
+            return today + timedelta(days=days)
+        
+        return None
     
     def find_duration_for_time_element(self, time_element):
         """Find duration information near a time element"""
@@ -348,10 +499,17 @@ class TennisAvailabilityChecker:
             print(f"❌ Error extracting availability info: {e}")
             return None
     
-    def check_alice_marble(self):
+    def check_alice_marble(self, date_input=None):
         """Check Alice Marble tennis court availability"""
         url = "https://rec.us/alicemarble"
-        return self.check_tennis_availability(url, "Alice Marble")
+        return self.check_tennis_availability(url, "Alice Marble", date_input)
+    
+    def check_court_by_date(self, court_name, date_input):
+        """Check any tennis court availability for a specific date"""
+        # For now, we'll use Alice Marble as the example
+        # In the future, this could be expanded to check different courts
+        url = "https://rec.us/alicemarble"
+        return self.check_tennis_availability(url, court_name, date_input)
     
     def close(self):
         """Close the browser"""
@@ -373,8 +531,16 @@ class TennisAvailabilityChecker:
 
 def main():
     """Main function to run the availability checker"""
+    import sys
+    
     print("🎾 Tennis Court Availability Checker")
     print("=" * 50)
+    
+    # Check for date input from command line
+    date_input = None
+    if len(sys.argv) > 1:
+        date_input = ' '.join(sys.argv[1:])
+        print(f"📅 Date input: {date_input}")
     
     checker = TennisAvailabilityChecker(use_existing_session=True)
     
@@ -384,7 +550,7 @@ def main():
             return False
         
         # Check Alice Marble availability
-        availability = checker.check_alice_marble()
+        availability = checker.check_alice_marble(date_input)
         
         if availability:
             print(f"\n📊 Availability Results:")
