@@ -40,8 +40,6 @@ class SFTennisChecker:
         
     def scrape_court_urls(self):
         """Scrape tennis court URLs from the main page"""
-        print("🔍 Scraping tennis court URLs...")
-        
         try:
             response = requests.get(self.base_url, timeout=10)
             response.raise_for_status()
@@ -95,11 +93,10 @@ class SFTennisChecker:
                             existing['name'] = base_name
             
             court_data = list(unique_courts.values())
-            print(f"✅ Found {len(court_data)} unique tennis courts (deduplicated)")
             return court_data
             
         except Exception as e:
-            print(f"❌ Error scraping URLs: {e}")
+            print(f"❌ error scraping urls: {e}")
             return []
     
     def setup_driver(self):
@@ -406,10 +403,10 @@ class SFTennisChecker:
             else:
                 max_workers = min(16, len(courts))
         
-        print(f"🚀 Checking {len(courts)} courts with {max_workers} workers...")
-        
         start_time = time.time()
         results = []
+        completed = 0
+        total = len(courts)
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_court = {
@@ -417,77 +414,104 @@ class SFTennisChecker:
                 for court in courts
             }
             
-            completed = 0
             for future in as_completed(future_to_court):
                 result = future.result()
                 results.append(result)
                 completed += 1
                 
-                if result['success']:
-                    times = result['availability'].get('time_slots_with_duration', [])
-                    print(f"✅ {result['court']}: {len(times)} slots ({completed}/{len(courts)})")
+                # Update progress bar
+                elapsed = time.time() - start_time
+                progress = completed / total
+                bar_length = 40
+                filled_length = int(bar_length * progress)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                
+                # Calculate ETA
+                if completed > 0:
+                    eta = (elapsed / completed) * (total - completed)
+                    eta_str = f"ETA: {eta:.0f}s" if eta > 0 else "ETA: --"
                 else:
-                    print(f"❌ {result['court']}: {result['error']} ({completed}/{len(courts)})")
+                    eta_str = "ETA: --"
+                
+                print(f"\r⏳ [{bar}] {completed}/{total} ({progress:.1%}) | {elapsed:.0f}s | {eta_str}", end='', flush=True)
         
         elapsed = time.time() - start_time
-        print(f"⏱️  Completed in {elapsed:.1f}s ({len(courts)/elapsed:.1f} courts/sec)")
+        print(f"\r✅ completed {total} courts in {elapsed:.1f}s ({total/elapsed:.1f} courts/sec)")
         
         return results
+    
+    def format_time(self, time_str):
+        """Convert time string to compact format"""
+        # Convert "10:00 AM" -> "10am", "1:30 PM" -> "1:30pm"
+        time_str = time_str.strip()
+        if ':' in time_str and ('AM' in time_str or 'PM' in time_str):
+            time_part = time_str.split()[0]
+            period = time_str.split()[1].lower()
+            return f"{time_part}{period}"
+        return time_str.lower()
+    
+    def format_court_name(self, court_name):
+        """Clean up court name - remove 'Tennis Court' and everything after"""
+        # Remove "Tennis Court" and everything after it
+        court = re.sub(r'\s+tennis\s+court.*$', '', court_name, flags=re.IGNORECASE)
+        return court.strip().lower()
     
     def format_results(self, results):
         """Format results in clean tabular format"""
         successful = [r for r in results if r['success']]
         failed = [r for r in results if not r['success']]
         
-        print(f"\n📊 RESULTS: {len(successful)} courts available, {len(failed)} failed")
-        print("=" * 80)
+        print(f"\n📊 results: {len(successful)} courts available, {len(failed)} failed")
+        print("=" * 70)
         
         if successful:
-            print(f"{'Court Name':<35} {'Available Times (Duration)':<45}")
-            print("-" * 80)
+            print(f"{'court':<25} {'times':<45}")
+            print("-" * 70)
             
             for result in successful:
-                court = result['court']
+                court = self.format_court_name(result['court'])
                 slots = result['availability'].get('time_slots_with_duration', [])
                 
                 if slots:
                     # Group by duration for cleaner display
                     time_groups = {}
                     for slot in slots:
-                        time_str = slot['time']
+                        time_str = self.format_time(slot['time'])
                         duration = slot['duration_minutes']
                         if duration not in time_groups:
                             time_groups[duration] = []
                         time_groups[duration].append(time_str)
                     
-                    # Format times compactly
+                    # Format times compactly - only show duration if not 60m
                     time_display = []
                     for duration, times in sorted(time_groups.items()):
                         times_str = ', '.join(sorted(set(times)))
-                        time_display.append(f"{times_str} ({duration}m)")
+                        if duration == 60:
+                            time_display.append(times_str)
+                        else:
+                            time_display.append(f"{times_str} ({duration}m)")
                     
                     times_display = ' | '.join(time_display)
                 else:
-                    times_display = "No specific times"
+                    times_display = "no times"
                 
-                # Truncate court name if too long
-                court_display = court[:32] + "..." if len(court) > 35 else court
+                # Truncate if too long
+                court_display = court[:22] + "..." if len(court) > 25 else court
                 times_display = times_display[:43] + "..." if len(times_display) > 45 else times_display
                 
-                print(f"{court_display:<35} {times_display:<45}")
+                print(f"{court_display:<25} {times_display:<45}")
         
         if failed:
-            print(f"\n❌ Failed ({len(failed)}):")
+            print(f"\n❌ failed ({len(failed)}):")
             for result in failed[:5]:  # Show first 5 failures
-                print(f"  {result['court']}: {result['error']}")
+                court = self.format_court_name(result['court'])
+                print(f"  {court}: {result['error'].lower()}")
             if len(failed) > 5:
                 print(f"  ... and {len(failed) - 5} more")
 
 def main():
     import sys
     
-    print("🎾 SF Tennis Court Availability Checker")
-    print("=" * 50)
     
     # Parse arguments
     date_input = None
@@ -507,7 +531,6 @@ def main():
         
         if args:
             date_input = ' '.join(args)
-            print(f"📅 Date: {date_input}")
     
     # Run checker
     checker = SFTennisChecker()
