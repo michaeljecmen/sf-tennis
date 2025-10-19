@@ -37,10 +37,48 @@ class TennisAvailabilityChecker:
         # Disable images for faster loading (optional)
         firefox_options.set_preference("permissions.default.image", 2)
         
+        # Minimize focus stealing
+        firefox_options.set_preference("browser.tabs.warnOnClose", False)
+        firefox_options.set_preference("browser.tabs.warnOnCloseOtherTabs", False)
+        firefox_options.set_preference("browser.shell.checkDefaultBrowser", False)
+        firefox_options.set_preference("browser.startup.page", 0)  # Don't load any page on startup
+        firefox_options.set_preference("browser.startup.homepage", "about:blank")
+        
+        # Try to run in headless mode first (no visible window)
+        # If that doesn't work, we'll fall back to visible mode
+        try:
+            print("🔄 Attempting to run in headless mode (no visible window)...")
+            firefox_options.add_argument("--headless")
+            self.driver = webdriver.Firefox(options=firefox_options)
+            print("✅ Firefox driver initialized in headless mode")
+            return True
+        except Exception as e:
+            print(f"⚠️  Headless mode failed: {e}")
+            print("🔄 Falling back to visible mode...")
+            # Remove headless argument and try again
+            firefox_options = Options()
+            firefox_options.set_preference("general.useragent.override", 
+                                         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
+            firefox_options.set_preference("permissions.default.image", 2)
+            firefox_options.set_preference("browser.tabs.warnOnClose", False)
+            firefox_options.set_preference("browser.tabs.warnOnCloseOtherTabs", False)
+            firefox_options.set_preference("browser.shell.checkDefaultBrowser", False)
+            firefox_options.set_preference("browser.startup.page", 0)
+            firefox_options.set_preference("browser.startup.homepage", "about:blank")
+        
         try:
             print("🔄 Starting new Firefox session...")
             self.driver = webdriver.Firefox(options=firefox_options)
             print("✅ Firefox driver initialized successfully")
+            
+            # Try to minimize the window to reduce focus stealing
+            try:
+                self.driver.minimize_window()
+                print("📱 Browser window minimized")
+            except Exception as e:
+                print(f"⚠️  Could not minimize window: {e}")
+            
             return True
         except Exception as e:
             print(f"❌ Error initializing Firefox driver: {e}")
@@ -521,8 +559,25 @@ class TennisAvailabilityChecker:
                     print("🔒 Browser closed")
                 else:
                     print("🔒 Browser already closed")
+                
+                # Try to restore focus to the previous application (only if not headless)
+                try:
+                    import subprocess
+                    # Use AppleScript to focus on the previous application
+                    subprocess.run([
+                        'osascript', '-e', 
+                        'tell application "System Events" to set frontmost of first process whose frontmost is true to true'
+                    ], check=False, capture_output=True)
+                    print("🔄 Attempted to restore focus to previous application")
+                except Exception as e:
+                    print(f"⚠️  Could not restore focus: {e}")
+                    
             except Exception as e:
-                print(f"⚠️  Error closing browser: {e}")
+                # Check if it's the expected "no connection" error in headless mode
+                if "Tried to run command without establishing a connection" in str(e):
+                    print("🔒 Browser closed (headless mode cleanup)")
+                else:
+                    print(f"⚠️  Error closing browser: {e}")
                 # Force quit if there's an issue
                 try:
                     self.driver.quit()
