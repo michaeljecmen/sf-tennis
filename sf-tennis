@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""
+SF Tennis Court Availability Checker
+
+A fast, parallel tennis court availability checker for San Francisco Rec & Park.
+Combines URL scraping and availability checking into a single executable.
+
+Usage:
+    python sf-tennis [date] [options]
+    
+Examples:
+    python sf-tennis tomorrow
+    python sf-tennis "next friday"
+    python sf-tennis "oct 25"
+    python sf-tennis --workers 8 "tomorrow"
+"""
+
+import time
+import json
+import os
+import re
+import threading
+import requests
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+from selenium import webdriver
+from selenium.webdriver.firefox.service import Service
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from urllib.parse import urljoin, urlparse
+
+class SFTennisChecker:
+    def __init__(self):
+        self.base_url = "https://sfrecpark.org/1446/Reservable-Tennis-Courts"
+        self.driver = None
+        
+    def scrape_court_urls(self):
+        """Scrape tennis court URLs from the main page"""
+        print("🔍 Scraping tennis court URLs...")
+        
+        try:
+            response = requests.get(self.base_url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Find all links
+            links = soup.find_all('a', href=True)
+            urls = []
+            
+            for link in links:
+                url = urljoin(self.base_url, link['href'])
+                text = link.get_text(strip=True)
+                urls.append({'url': url, 'text': text})
+            
+            # Filter for tennis courts
+            tennis_keywords = ['tennis', 'court']
+            excluded_url = "https://sfrecpark.org/1446/Reservable-Tennis-Courts"
+            
+            tennis_urls = []
+            for url_data in urls:
+                url = url_data['url'].lower()
+                text = url_data['text'].lower()
+                if url_data['url'] == excluded_url:
+                    continue
+                if any(keyword in url or keyword in text for keyword in tennis_keywords):
+                    tennis_urls.append(url_data)
+            
+            # Filter for rec.us URLs and deduplicate by URL
+            unique_courts = {}
+            for url_data in tennis_urls:
+                url = url_data.get('url', '')
+                text = url_data.get('text', '')
+                
+                if 'rec.us' in url and any(keyword in text.lower() for keyword in ['tennis', 'court']):
+                    # Extract base court name (remove #1, #2, etc.)
+                    base_name = re.sub(r'\s+#\d+\*?$', '', text.strip())
+                    if not base_name:
+                        base_name = url.split('/')[-1]
+                    
+                    # Only keep the first occurrence of each unique URL
+                    if url not in unique_courts:
+                        unique_courts[url] = {
+                            'name': base_name,
+                            'url': url,
+                            'text': text
+                        }
+                    else:
+                        # If we already have this URL, update the name to be more generic
+                        existing = unique_courts[url]
+                        if '#' in existing['name'] and '#' not in base_name:
+                            existing['name'] = base_name
+            
+            court_data = list(unique_courts.values())
+            print(f"✅ Found {len(court_data)} unique tennis courts (deduplicated)")
+            return court_data
+            
+        except Exception as e:
+            print(f"❌ Error scraping URLs: {e}")
+            return []
+    
+    def setup_driver(self):
+        """Set up Firefox driver with optimized options"""
+        firefox_options = Options()
+        
+        # Optimized preferences for speed
+        firefox_options.set_preference("general.useragent.override", 
+                                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
+        
+        # Speed optimizations
+        firefox_options.set_preference("permissions.default.image", 2)  # No images
+        firefox_options.set_preference("browser.tabs.warnOnClose", False)
+        firefox_options.set_preference("browser.tabs.warnOnCloseOtherTabs", False)
+        firefox_options.set_preference("browser.shell.checkDefaultBrowser", False)
+        firefox_options.set_preference("browser.startup.page", 0)
+        firefox_options.set_preference("browser.startup.homepage", "about:blank")
+        firefox_options.set_preference("dom.webdriver.enabled", False)
+        firefox_options.set_preference("useAutomationExtension", False)
+        
+        # Try headless first
+        try:
+            firefox_options.add_argument("--headless")
+            self.driver = webdriver.Firefox(options=firefox_options)
+            return True
+        except Exception:
+            # Fallback to visible mode
+            firefox_options = Options()
+            firefox_options.set_preference("general.useragent.override", 
+                                         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            firefox_options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
+            firefox_options.set_preference("permissions.default.image", 2)
+            firefox_options.set_preference("browser.tabs.warnOnClose", False)
+            firefox_options.set_preference("browser.tabs.warnOnCloseOtherTabs", False)
+            firefox_options.set_preference("browser.shell.checkDefaultBrowser", False)
+            firefox_options.set_preference("browser.startup.page", 0)
+            firefox_options.set_preference("browser.startup.homepage", "about:blank")
+            
+            try:
+                self.driver = webdriver.Firefox(options=firefox_options)
+                self.driver.minimize_window()
+                return True
+            except Exception as e:
+                print(f"❌ Error initializing Firefox: {e}")
+                return False
+    
+    def parse_date_input(self, date_input):
+        """Parse natural language date input"""
+        if not date_input:
+            return None
+            
+        date_input = date_input.lower().strip()
+        today = datetime.now()
+        
+        if date_input == "today":
+            return today
+        elif date_input == "tomorrow":
+            return today + timedelta(days=1)
+        elif date_input.startswith("next "):
+            day_name = date_input[5:]
+            days_ahead = 0
+            for i in range(1, 8):
+                future_date = today + timedelta(days=i)
+                if future_date.strftime('%A').lower() == day_name:
+                    return future_date
+        elif date_input in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+            days_ahead = 0
+            for i in range(1, 8):
+                future_date = today + timedelta(days=i)
+                if future_date.strftime('%A').lower() == date_input:
+                    return future_date
+        elif re.match(r'oct\s+\d+', date_input):
+            day = int(re.search(r'\d+', date_input).group())
+            return datetime(2025, 10, day)
+        elif re.match(r'\d+/\d+', date_input):
+            month, day = map(int, date_input.split('/'))
+            return datetime(2025, month, day)
+        elif re.match(r'in \d+ days?', date_input):
+            days = int(re.search(r'\d+', date_input).group())
+            return today + timedelta(days=days)
+        
+        return None
+    
+    def click_specific_date(self, target_date=None):
+        """Click on a specific date in the date picker"""
+        date_picker_selectors = [
+            "//*[contains(@class, 'react-datepicker-wrapper')]",
+            "//*[contains(@class, 'date') and contains(@class, 'picker')]",
+            "//*[contains(@class, 'calendar')]",
+            "//*[contains(@class, 'picker')]",
+            "//input[@type='date']"
+        ]
+        
+        # Open date picker
+        for selector in date_picker_selectors:
+            try:
+                elements = self.driver.find_elements(By.XPATH, selector)
+                if elements:
+                    elements[0].click()
+                    break
+            except:
+                continue
+        
+        if target_date:
+            day_number = str(target_date.day)
+            date_selectors = [
+                f"//*[contains(@class, 'react-datepicker__day') and contains(text(), '{day_number}') and not(contains(text(), 'St'))]",
+                f"//*[contains(@class, 'day') and contains(text(), '{day_number}')]",
+                f"//*[text()='{day_number}']"
+            ]
+            
+            for selector in date_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        elements[0].click()
+                        return True
+                except:
+                    continue
+        
+        return False
+    
+    def find_duration_for_time_element(self, time_element):
+        """Find duration information for a time element"""
+        try:
+            # Check element text for numbers
+            text = time_element.text
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                num = int(numbers[0])
+                if 15 <= num <= 180:  # Reasonable duration range
+                    return num
+            
+            # Check parent element
+            parent = time_element.find_element(By.XPATH, "..")
+            parent_text = parent.text
+            numbers = re.findall(r'\d+', parent_text)
+            if numbers:
+                num = int(numbers[0])
+                if 15 <= num <= 180:
+                    return num
+            
+            # Check siblings for duration
+            siblings = time_element.find_elements(By.XPATH, "following-sibling::* | preceding-sibling::*")
+            for sibling in siblings[:3]:  # Check first 3 siblings
+                sibling_text = sibling.text
+                numbers = re.findall(r'\d+', sibling_text)
+                if numbers:
+                    num = int(numbers[0])
+                    if 15 <= num <= 180:
+                        return num
+            
+            # Look for duration classes
+            duration_selectors = [
+                ".//*[contains(@class, 'duration')]",
+                ".//*[contains(@class, 'minutes')]",
+                ".//*[contains(@class, 'time')]"
+            ]
+            
+            for selector in duration_selectors:
+                try:
+                    duration_elem = time_element.find_element(By.XPATH, selector)
+                    duration_text = duration_elem.text
+                    numbers = re.findall(r'\d+', duration_text)
+                    if numbers:
+                        num = int(numbers[0])
+                        if 15 <= num <= 180:
+                            return num
+                except:
+                    continue
+            
+            return None
+        except Exception:
+            return None
+    
+    def extract_availability_info(self):
+        """Extract availability information from the page"""
+        availability_info = {
+            'has_availability': False,
+            'availability_text': '',
+            'next_available': '',
+            'operating_hours': '',
+            'available_times': [],
+            'time_slots_with_duration': [],
+            'raw_text_found': []
+        }
+        
+        # Look for time elements
+        time_selectors = [
+            "//*[contains(@class, 'time')]",
+            "//*[contains(@class, 'slot')]",
+            "//*[contains(@class, 'hour')]",
+            "//*[contains(@class, 'booking')]",
+            "//*[contains(@class, 'reservation')]",
+            "//*[contains(text(), 'AM') or contains(text(), 'PM')]",
+            "//button[contains(text(), 'AM') or contains(text(), 'PM') or contains(text(), ':')]",
+            "//*[contains(@class, 'react-datepicker__time')]",
+            "//*[contains(@class, 'time-picker')]",
+            "//*[contains(@class, 'time-slot')]"
+        ]
+        
+        time_elements = []
+        for selector in time_selectors:
+            try:
+                elements = self.driver.find_elements(By.XPATH, selector)
+                time_elements.extend(elements)
+                if elements:
+                    break
+            except:
+                continue
+        
+        # Process time elements
+        for element in time_elements:
+            text = element.text.strip()
+            if any(pattern in text for pattern in ['AM', 'PM', ':', 'am', 'pm']):
+                if len(text) < 30 and len(text) > 2:
+                    availability_info['available_times'].append(text)
+                    duration = self.find_duration_for_time_element(element)
+                    if duration:
+                        time_slot = {'time': text, 'duration_minutes': duration}
+                        availability_info['time_slots_with_duration'].append(time_slot)
+        
+        # Check for availability patterns
+        page_text = self.driver.page_source.lower()
+        availability_patterns = [
+            'available', 'reservation', 'book now', '7:30am to 7:30pm',
+            'operating hours', 'open', 'closed', 'hours'
+        ]
+        
+        for pattern in availability_patterns:
+            if pattern in page_text:
+                availability_info['raw_text_found'].append(pattern)
+        
+        availability_info['has_availability'] = len(availability_info['available_times']) > 0
+        
+        return availability_info
+    
+    def check_single_court(self, court_data, date_input):
+        """Check availability for a single court"""
+        court_name = court_data['name']
+        url = court_data['url']
+        
+        checker = SFTennisChecker()
+        
+        try:
+            if not checker.setup_driver():
+                return {'court': court_name, 'error': 'Driver failed', 'success': False}
+            
+            # Navigate to page
+            checker.driver.get(url)
+            time.sleep(2)  # Reduced wait time
+            
+            # Parse date
+            target_date = checker.parse_date_input(date_input)
+            if target_date:
+                checker.click_specific_date(target_date)
+                time.sleep(1)  # Reduced wait time
+            
+            # Extract availability
+            availability = checker.extract_availability_info()
+            
+            if availability['has_availability']:
+                return {
+                    'court': court_name,
+                    'url': url,
+                    'availability': availability,
+                    'success': True
+                }
+            else:
+                return {
+                    'court': court_name,
+                    'url': url,
+                    'error': 'No availability found',
+                    'success': False
+                }
+                
+        except Exception as e:
+            return {
+                'court': court_name,
+                'url': url,
+                'error': str(e),
+                'success': False
+            }
+        finally:
+            if checker.driver:
+                try:
+                    checker.driver.quit()
+                except:
+                    pass
+    
+    def check_all_courts(self, date_input=None, max_workers=12):
+        """Check all tennis courts in parallel"""
+        courts = self.scrape_court_urls()
+        if not courts:
+            return []
+        
+        # Auto-optimize worker count based on court count
+        if max_workers == 12:  # Default
+            if len(courts) < 20:
+                max_workers = min(6, len(courts))
+            elif len(courts) < 50:
+                max_workers = min(10, len(courts))
+            else:
+                max_workers = min(16, len(courts))
+        
+        print(f"🚀 Checking {len(courts)} courts with {max_workers} workers...")
+        
+        start_time = time.time()
+        results = []
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_court = {
+                executor.submit(self.check_single_court, court, date_input): court 
+                for court in courts
+            }
+            
+            completed = 0
+            for future in as_completed(future_to_court):
+                result = future.result()
+                results.append(result)
+                completed += 1
+                
+                if result['success']:
+                    times = result['availability'].get('time_slots_with_duration', [])
+                    print(f"✅ {result['court']}: {len(times)} slots ({completed}/{len(courts)})")
+                else:
+                    print(f"❌ {result['court']}: {result['error']} ({completed}/{len(courts)})")
+        
+        elapsed = time.time() - start_time
+        print(f"⏱️  Completed in {elapsed:.1f}s ({len(courts)/elapsed:.1f} courts/sec)")
+        
+        return results
+    
+    def format_results(self, results):
+        """Format results in clean tabular format"""
+        successful = [r for r in results if r['success']]
+        failed = [r for r in results if not r['success']]
+        
+        print(f"\n📊 RESULTS: {len(successful)} courts available, {len(failed)} failed")
+        print("=" * 80)
+        
+        if successful:
+            print(f"{'Court Name':<35} {'Available Times (Duration)':<45}")
+            print("-" * 80)
+            
+            for result in successful:
+                court = result['court']
+                slots = result['availability'].get('time_slots_with_duration', [])
+                
+                if slots:
+                    # Group by duration for cleaner display
+                    time_groups = {}
+                    for slot in slots:
+                        time_str = slot['time']
+                        duration = slot['duration_minutes']
+                        if duration not in time_groups:
+                            time_groups[duration] = []
+                        time_groups[duration].append(time_str)
+                    
+                    # Format times compactly
+                    time_display = []
+                    for duration, times in sorted(time_groups.items()):
+                        times_str = ', '.join(sorted(set(times)))
+                        time_display.append(f"{times_str} ({duration}m)")
+                    
+                    times_display = ' | '.join(time_display)
+                else:
+                    times_display = "No specific times"
+                
+                # Truncate court name if too long
+                court_display = court[:32] + "..." if len(court) > 35 else court
+                times_display = times_display[:43] + "..." if len(times_display) > 45 else times_display
+                
+                print(f"{court_display:<35} {times_display:<45}")
+        
+        if failed:
+            print(f"\n❌ Failed ({len(failed)}):")
+            for result in failed[:5]:  # Show first 5 failures
+                print(f"  {result['court']}: {result['error']}")
+            if len(failed) > 5:
+                print(f"  ... and {len(failed) - 5} more")
+
+def main():
+    import sys
+    
+    print("🎾 SF Tennis Court Availability Checker")
+    print("=" * 50)
+    
+    # Parse arguments
+    date_input = None
+    max_workers = 12  # Optimized default
+    
+    if len(sys.argv) > 1:
+        args = sys.argv[1:]
+        
+        if '--workers' in args:
+            try:
+                worker_idx = args.index('--workers')
+                max_workers = int(args[worker_idx + 1])
+                args.pop(worker_idx)
+                args.pop(worker_idx)
+            except (ValueError, IndexError):
+                print("⚠️  Invalid --workers value, using auto-optimized default")
+        
+        if args:
+            date_input = ' '.join(args)
+            print(f"📅 Date: {date_input}")
+    
+    # Run checker
+    checker = SFTennisChecker()
+    results = checker.check_all_courts(date_input, max_workers)
+    checker.format_results(results)
+
+if __name__ == "__main__":
+    main()

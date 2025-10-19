@@ -9,6 +9,8 @@ import time
 import json
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.firefox.service import Service
@@ -549,6 +551,137 @@ class TennisAvailabilityChecker:
         url = "https://rec.us/alicemarble"
         return self.check_tennis_availability(url, court_name, date_input)
     
+    def load_court_urls(self):
+        """Load tennis court URLs from the scraper results"""
+        try:
+            # Look for the most recent tennis_urls JSON file
+            json_files = [f for f in os.listdir('.') if f.startswith('tennis_urls_') and f.endswith('.json')]
+            if not json_files:
+                print("❌ No tennis_urls JSON file found. Run the scraper first.")
+                return []
+            
+            # Get the most recent file
+            latest_file = max(json_files, key=os.path.getctime)
+            print(f"📄 Loading court URLs from: {latest_file}")
+            
+            with open(latest_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract tennis court URLs
+            tennis_urls = data.get('tennis_urls', [])
+            court_data = []
+            
+            for url_data in tennis_urls:
+                url = url_data.get('url', '')
+                text = url_data.get('text', '')
+                
+                # Filter for rec.us URLs (the actual booking pages)
+                if 'rec.us' in url and any(keyword in text.lower() for keyword in ['tennis', 'court']):
+                    court_name = text.strip() or url.split('/')[-1]
+                    court_data.append({
+                        'name': court_name,
+                        'url': url,
+                        'text': text
+                    })
+            
+            print(f"🎾 Found {len(court_data)} tennis courts to check")
+            return court_data
+            
+        except Exception as e:
+            print(f"❌ Error loading court URLs: {e}")
+            return []
+    
+    def check_single_court(self, court_data, date_input):
+        """Check availability for a single court (used in parallel processing)"""
+        court_name = court_data['name']
+        url = court_data['url']
+        
+        # Create a new checker instance for this thread
+        checker = TennisAvailabilityChecker(use_existing_session=False)
+        
+        try:
+            if not checker.setup_driver():
+                return {
+                    'court': court_name,
+                    'url': url,
+                    'error': 'Failed to initialize driver',
+                    'success': False
+                }
+            
+            # Check availability
+            availability = checker.check_tennis_availability(url, court_name, date_input)
+            
+            if availability:
+                return {
+                    'court': court_name,
+                    'url': url,
+                    'availability': availability,
+                    'success': True
+                }
+            else:
+                return {
+                    'court': court_name,
+                    'url': url,
+                    'error': 'No availability data found',
+                    'success': False
+                }
+                
+        except Exception as e:
+            return {
+                'court': court_name,
+                'url': url,
+                'error': str(e),
+                'success': False
+            }
+        finally:
+            checker.close()
+    
+    def check_all_courts_parallel(self, date_input=None, max_workers=3):
+        """Check all tennis courts in parallel"""
+        # Load court URLs
+        courts = self.load_court_urls()
+        if not courts:
+            return []
+        
+        print(f"\n🚀 Starting parallel check of {len(courts)} tennis courts...")
+        print(f"📅 Date: {date_input or 'Next available'}")
+        print(f"⚡ Max parallel workers: {max_workers}")
+        
+        results = []
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all court checks
+            future_to_court = {
+                executor.submit(self.check_single_court, court, date_input): court 
+                for court in courts
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_court):
+                court = future_to_court[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    
+                    if result['success']:
+                        times = result['availability'].get('available_times', [])
+                        durations = result['availability'].get('time_slots_with_duration', [])
+                        print(f"✅ {result['court']}: {len(times)} time slots found")
+                    else:
+                        print(f"❌ {result['court']}: {result['error']}")
+                        
+                except Exception as e:
+                    print(f"❌ {court['name']}: Exception - {e}")
+                    results.append({
+                        'court': court['name'],
+                        'url': court['url'],
+                        'error': str(e),
+                        'success': False
+                    })
+        
+        return results
+    
     def close(self):
         """Close the browser"""
         if self.driver:
@@ -591,54 +724,127 @@ def main():
     print("🎾 Tennis Court Availability Checker")
     print("=" * 50)
     
-    # Check for date input from command line
+    # Check for command line arguments
     date_input = None
+    check_all = False
+    max_workers = 3
+    
     if len(sys.argv) > 1:
-        date_input = ' '.join(sys.argv[1:])
-        print(f"📅 Date input: {date_input}")
+        args = sys.argv[1:]
+        
+        # Check for special flags
+        if '--all' in args or '-a' in args:
+            check_all = True
+            args.remove('--all' if '--all' in args else '-a')
+        
+        if '--workers' in args:
+            try:
+                worker_idx = args.index('--workers')
+                max_workers = int(args[worker_idx + 1])
+                args.pop(worker_idx)
+                args.pop(worker_idx)
+            except (ValueError, IndexError):
+                print("⚠️  Invalid --workers value, using default (3)")
+        
+        # Remaining args are the date input
+        if args:
+            date_input = ' '.join(args)
+            print(f"📅 Date input: {date_input}")
     
-    checker = TennisAvailabilityChecker(use_existing_session=True)
+    if check_all:
+        print("🚀 Checking ALL tennis courts in parallel...")
+        checker = TennisAvailabilityChecker(use_existing_session=False)
+        
+        try:
+            # Check all courts in parallel
+            results = checker.check_all_courts_parallel(date_input, max_workers)
+            
+            # Display summary results
+            print(f"\n📊 SUMMARY RESULTS:")
+            print("=" * 60)
+            
+            successful_checks = [r for r in results if r['success']]
+            failed_checks = [r for r in results if not r['success']]
+            
+            print(f"✅ Successful: {len(successful_checks)} courts")
+            print(f"❌ Failed: {len(failed_checks)} courts")
+            
+            if successful_checks:
+                print(f"\n🎾 COURTS WITH AVAILABILITY:")
+                for result in successful_checks:
+                    court = result['court']
+                    availability = result['availability']
+                    times = availability.get('available_times', [])
+                    durations = availability.get('time_slots_with_duration', [])
+                    
+                    print(f"\n  {court}:")
+                    if times:
+                        print(f"    Times: {', '.join(times)}")
+                    if durations:
+                        print(f"    Slots with Duration:")
+                        for slot in durations:
+                            print(f"      {slot['time']}: {slot['duration_minutes']} minutes")
+                    else:
+                        print(f"    No specific time slots found")
+            
+            if failed_checks:
+                print(f"\n❌ FAILED CHECKS:")
+                for result in failed_checks:
+                    print(f"  {result['court']}: {result['error']}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error in parallel checking: {e}")
+            return False
+        finally:
+            checker.close()
     
-    try:
-        # Set up the driver
-        if not checker.setup_driver():
+    else:
+        # Single court check (Alice Marble)
+        print("🎾 Checking Alice Marble tennis court...")
+        checker = TennisAvailabilityChecker(use_existing_session=True)
+        
+        try:
+            # Set up the driver
+            if not checker.setup_driver():
+                return False
+            
+            # Check Alice Marble availability
+            availability = checker.check_alice_marble(date_input)
+            
+            if availability:
+                print(f"\n📊 Availability Results:")
+                print(f"  Court: Alice Marble")
+                print(f"  Has Availability: {'✅ Yes' if availability['has_availability'] else '❌ No'}")
+                print(f"  Availability Text: {availability['availability_text']}")
+                print(f"  Next Available: {availability['next_available']}")
+                print(f"  Operating Hours: {availability['operating_hours']}")
+                
+                if availability['available_times']:
+                    print(f"  Available Times: {', '.join(set(availability['available_times']))}")
+                else:
+                    print(f"  Available Times: No specific times found")
+                
+                if availability['time_slots_with_duration']:
+                    print(f"  Time Slots with Duration:")
+                    for slot in availability['time_slots_with_duration']:
+                        print(f"    {slot['time']}: {slot['duration_minutes']} minutes")
+                else:
+                    print(f"  Time Slots with Duration: No duration info found")
+                
+                print(f"  Patterns Found: {', '.join(availability['raw_text_found'])}")
+                
+                # Results are already printed above, no need to save JSON files
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error in main: {e}")
             return False
         
-        # Check Alice Marble availability
-        availability = checker.check_alice_marble(date_input)
-        
-        if availability:
-            print(f"\n📊 Availability Results:")
-            print(f"  Court: Alice Marble")
-            print(f"  Has Availability: {'✅ Yes' if availability['has_availability'] else '❌ No'}")
-            print(f"  Availability Text: {availability['availability_text']}")
-            print(f"  Next Available: {availability['next_available']}")
-            print(f"  Operating Hours: {availability['operating_hours']}")
-            
-            if availability['available_times']:
-                print(f"  Available Times: {', '.join(set(availability['available_times']))}")
-            else:
-                print(f"  Available Times: No specific times found")
-            
-            if availability['time_slots_with_duration']:
-                print(f"  Time Slots with Duration:")
-                for slot in availability['time_slots_with_duration']:
-                    print(f"    {slot['time']}: {slot['duration_minutes']} minutes")
-            else:
-                print(f"  Time Slots with Duration: No duration info found")
-            
-            print(f"  Patterns Found: {', '.join(availability['raw_text_found'])}")
-            
-            # Results are already printed above, no need to save JSON files
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error in main: {e}")
-        return False
-    
-    finally:
-        checker.close()
+        finally:
+            checker.close()
 
 if __name__ == "__main__":
     main()
