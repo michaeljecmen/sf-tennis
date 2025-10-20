@@ -51,16 +51,21 @@ class GoogleMapsDistanceCalculator:
         firefox_options.set_preference("dom.webdriver.enabled", False)
         firefox_options.set_preference("useAutomationExtension", False)
         
-        # Additional speed optimizations
+        # JavaScript and DOM settings for Google Maps
         firefox_options.set_preference("javascript.enabled", True)
         firefox_options.set_preference("dom.disable_beforeunload", True)
-        firefox_options.set_preference("browser.cache.disk.enable", False)
-        firefox_options.set_preference("browser.cache.memory.enable", False)
-        firefox_options.set_preference("browser.cache.offline.enable", False)
-        firefox_options.set_preference("network.http.use-cache", False)
-        firefox_options.set_preference("media.autoplay.default", 5)  # Block autoplay
+        firefox_options.set_preference("dom.webnotifications.enabled", False)
         firefox_options.set_preference("dom.push.enabled", False)
         firefox_options.set_preference("dom.serviceWorkers.enabled", False)
+        
+        # Cache settings (keep some caching for Google Maps to work properly)
+        firefox_options.set_preference("browser.cache.disk.enable", True)
+        firefox_options.set_preference("browser.cache.memory.enable", True)
+        firefox_options.set_preference("browser.cache.offline.enable", True)
+        firefox_options.set_preference("network.http.use-cache", True)
+        
+        # Media settings
+        firefox_options.set_preference("media.autoplay.default", 5)  # Block autoplay
         
         # Try headless first for production
         try:
@@ -298,7 +303,7 @@ class GoogleMapsDistanceCalculator:
             
             # Select biking mode
             print(f"  🚴 Selecting biking mode...")
-            time.sleep(2)  # Wait longer for the page to fully load
+            time.sleep(3)  # Wait longer for the page to fully load
             
             # Dump HTML for debugging
             print(f"  🔍 Dumping HTML for debugging...")
@@ -319,7 +324,14 @@ class GoogleMapsDistanceCalculator:
                 "//button[contains(text(), 'bike')]",
                 "//*[contains(@aria-label, 'Cycling')]",
                 "//*[contains(@aria-label, 'Bicycling')]",
-                "//*[contains(@aria-label, 'bike')]"
+                "//*[contains(@aria-label, 'bike')]",
+                # Additional selectors for different Google Maps layouts
+                "//div[contains(@class, 'travel-mode')]//button[contains(@aria-label, 'Cycling')]",
+                "//div[contains(@class, 'travel-mode')]//button[contains(@aria-label, 'Bicycling')]",
+                "//div[contains(@class, 'travel-mode')]//button[contains(@aria-label, 'bike')]",
+                "//div[contains(@class, 'mode')]//button[contains(@aria-label, 'Cycling')]",
+                "//div[contains(@class, 'mode')]//button[contains(@aria-label, 'Bicycling')]",
+                "//div[contains(@class, 'mode')]//button[contains(@aria-label, 'bike')]"
             ]
             
             bike_selected = False
@@ -328,10 +340,13 @@ class GoogleMapsDistanceCalculator:
                     bike_buttons = self.driver.find_elements(By.XPATH, selector)
                     for bike_btn in bike_buttons:
                         if bike_btn.is_displayed() and bike_btn.is_enabled():
+                            # Scroll to button if needed
+                            self.driver.execute_script("arguments[0].scrollIntoView(true);", bike_btn)
+                            time.sleep(0.5)
                             bike_btn.click()
                             print(f"  ✅ Selected biking mode with selector: {selector}")
                             bike_selected = True
-                            time.sleep(5)  # Wait longer for mode change
+                            time.sleep(7)  # Wait longer for mode change and route recalculation
                             break
                     if bike_selected:
                         break
@@ -362,51 +377,63 @@ class GoogleMapsDistanceCalculator:
             # Look for biking time
             print(f"  🚴 Looking for biking time...")
             
-            # Debug: print all text elements containing 'min'
-            print(f"  🔍 Debug: Looking for all elements with 'min'...")
-            min_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'min')]")
-            for i, element in enumerate(min_elements[:10]):  # Show first 10
-                text = element.text.strip()
-                if text:  # Only show non-empty elements
-                    print(f"    Element {i}: '{text}'")
+            # Wait longer for the cycling mode to fully load and calculate
+            print(f"  ⏳ Waiting for cycling route to calculate...")
+            time.sleep(8)  # Increased wait time for JavaScript to load cycling times
             
-            # Look for time elements - try various selectors
-            time_selectors = [
-                "//*[contains(text(), 'min') and contains(text(), 'bike')]",
-                "//*[contains(text(), 'min') and contains(@class, 'bike')]",
-                "//*[contains(text(), 'min')]//*[contains(text(), 'bike')]",
+            # Try to find cycling-specific elements first
+            print(f"  🔍 Looking for cycling-specific time elements...")
+            cycling_selectors = [
+                # Target the cycling mode button with data-travel_mode="1" and get its time
+                "//div[@data-travel_mode='1' and contains(@class, 'selected')]//div[contains(@class, 'Fl2iee') and contains(text(), 'min')]",
+                "//div[@data-travel_mode='1']//div[contains(@class, 'Fl2iee') and contains(text(), 'min')]",
+                "//div[@data-travel_mode='1']//*[contains(text(), 'min')]",
+                # Fallback selectors
+                "//*[contains(@aria-label, 'Cycling')]//*[contains(text(), 'min')]",
+                "//*[contains(@aria-label, 'Bicycling')]//*[contains(text(), 'min')]",
                 "//*[contains(@aria-label, 'bike')]//*[contains(text(), 'min')]",
-                "//*[contains(text(), 'bike')]//*[contains(text(), 'min')]",
-                # Look for cycling-specific times (24 min from the HTML)
-                "//div[contains(text(), '24 min')]",
-                "//*[contains(text(), '24 min')]",
-                # Look for any time that's not 14 min (driving time)
-                "//*[contains(text(), 'min') and not(contains(text(), '14 min'))]",
-                "//*[contains(text(), 'min')]"  # Just look for any time
+                "//*[contains(@class, 'bike')]//*[contains(text(), 'min')]",
+                "//*[contains(@class, 'cycling')]//*[contains(text(), 'min')]"
             ]
             
-            for selector in time_selectors:
+            for selector in cycling_selectors:
                 try:
-                    time_elements = self.driver.find_elements(By.XPATH, selector)
-                    for element in time_elements:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    for element in elements:
                         text = element.text.strip()
                         if 'min' in text:
-                            # Extract time
                             time_match = re.search(r'(\d+)\s*min', text)
                             if time_match:
                                 minutes = int(time_match.group(1))
-                                print(f"  ✅ Found time: {minutes} minutes (text: '{text}')")
+                                print(f"  ✅ Found cycling time: {minutes} minutes (text: '{text}', selector: {selector})")
                                 return {
                                     'duration_text': f"{minutes} min",
                                     'duration_seconds': minutes * 60,
                                     'duration_minutes': minutes,
-                                    'distance_text': 'Unknown',  # We don't need distance for sorting
+                                    'distance_text': 'Unknown',
                                     'distance_meters': 0
                                 }
-                except:
+                except Exception as e:
+                    print(f"  ⚠️  Error with selector {selector}: {e}")
                     continue
             
-            print(f"  ⚠️  Could not find biking time")
+            # If cycling-specific selectors didn't work, dump HTML for analysis
+            print(f"  🔍 Cycling selectors failed, dumping HTML for analysis...")
+            page_source = self.driver.page_source
+            with open('debug_cycling_page.html', 'w', encoding='utf-8') as f:
+                f.write(page_source)
+            print(f"  💾 Saved HTML to debug_cycling_page.html")
+            
+            # Debug: print all text elements containing 'min' to see what's available
+            print(f"  🔍 Debug: Looking for all elements with 'min'...")
+            min_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'min')]")
+            for i, element in enumerate(min_elements[:20]):  # Show first 20
+                text = element.text.strip()
+                if text:  # Only show non-empty elements
+                    print(f"    Element {i}: '{text}'")
+            
+            # For now, return None so we can analyze the HTML first
+            print(f"  ⚠️  Temporarily returning None - please check debug_cycling_page.html for cycling time tags")
             return None
             
         except Exception as e:
